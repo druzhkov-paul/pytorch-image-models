@@ -89,7 +89,10 @@ class ScaledStdConv2d(nn.Conv2d):
 
     def get_weight(self):
         if self.use_layernorm:
-            weight = self.scale * F.layer_norm(self.weight, self.weight.shape[1:], eps=self.eps)
+            # target_shape = tuple(x.item() for x in self.weight.shape[1:])
+            target_shape = self.weight.shape[1:]
+            print(target_shape)
+            weight = self.scale * F.layer_norm(self.weight, target_shape, eps=float(self.eps))
         else:
             std, mean = torch.std_mean(self.weight, dim=[1, 2, 3], keepdim=True, unbiased=False)
             weight = self.scale * (self.weight - mean) / (std + self.eps)
@@ -138,6 +141,25 @@ class ScaledStdConv2dSame(nn.Conv2d):
         return self.gain * weight
 
     def forward(self, x):
+        # import torch.jit
+        # from torch.jit import _disable_tracing
+
+        if torch.onnx.is_in_onnx_export():
+            with _disable_tracing():
+                weights = self.get_weight()
+                weights = weights.detach()
+        else:
+            weights = self.get_weight()
+
         if self.same_pad:
             x = pad_same(x, self.kernel_size, self.stride, self.dilation)
-        return F.conv2d(x, self.get_weight(), self.bias, self.stride, self.padding, self.dilation, self.groups)
+        return F.conv2d(x, weights, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+class _disable_tracing(object):
+    def __enter__(self):
+        self.state = torch._C._get_tracing_state()
+        torch._C._set_tracing_state(None)
+
+    def __exit__(self, *args):
+        torch._C._set_tracing_state(self.state)
+        self.state = None
