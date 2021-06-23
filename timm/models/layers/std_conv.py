@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .padding import get_padding, get_padding_value, pad_same
+from ...utils.export import py_symbolic
 
 
 def get_weight(module):
@@ -132,6 +133,13 @@ class ScaledStdConv2dSame(nn.Conv2d):
     #         weight = (self.weight - mean) * scale
     #     return self.gain * weight
 
+    def train(self, mode=True):
+        super().train(mode)
+        if not mode:
+            self.ready_weights = self.get_weight().detach()
+        else:
+            self.ready_weights = None
+
     def get_weight(self):
         if self.use_layernorm:
             weight = self.scale * F.layer_norm(self.weight, self.weight.shape[1:], eps=self.eps)
@@ -144,16 +152,30 @@ class ScaledStdConv2dSame(nn.Conv2d):
         # import torch.jit
         # from torch.jit import _disable_tracing
 
-        if torch.onnx.is_in_onnx_export():
-            with _disable_tracing():
-                weights = self.get_weight()
-                weights = weights.detach()
+        # if torch.onnx.is_in_onnx_export():
+        #     with _disable_tracing():
+        #         weights = self.get_weight()
+        #         weights = weights.detach()
+        # else:
+        #     weights = self.get_weight()
+
+        if self.eval:
+            weights = self.ready_weights
         else:
             weights = self.get_weight()
 
         if self.same_pad:
-            x = pad_same(x, self.kernel_size, self.stride, self.dilation)
+            # x = pad_same(x, self.kernel_size, self.stride, self.dilation)
+            return conv_same_pad(x, weights, self.bias, self.kernel_size, self.stride, self.padding, self.dilation, self.groups)
         return F.conv2d(x, weights, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+
+@py_symbolic()
+def conv_same_pad(x, weights, bias, kernel_size, stride, padding, dilation, groups):
+    # print('conv_same_pad')
+    x = pad_same(x, kernel_size, stride, dilation)
+    return F.conv2d(x, weights, bias, stride, padding, dilation, groups)
+
 
 class _disable_tracing(object):
     def __enter__(self):
