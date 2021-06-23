@@ -330,7 +330,10 @@ class VisionTransformer(nn.Module):
 
     def forward_features(self, x):
         x = self.patch_embed(x)
-        cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        # cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        shape = list(x.shape)
+        shape[1] = 1
+        cls_token = self.cls_token.expand(*shape)
         if self.dist_token is None:
             x = torch.cat((cls_token, x), dim=1)
         else:
