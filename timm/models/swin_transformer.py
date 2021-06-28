@@ -11,6 +11,7 @@ Code/weights from https://github.com/microsoft/Swin-Transformer, original copyri
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ze Liu
 # --------------------------------------------------------
+from collections import OrderedDict
 import logging
 import math
 from copy import deepcopy
@@ -27,6 +28,24 @@ from .registry import register_model
 from .vision_transformer import checkpoint_filter_fn, _init_vit_weights
 
 _logger = logging.getLogger(__name__)
+
+
+class DebugOutput:
+    enable = False
+    outputs = OrderedDict()
+    stage = 0
+    layer = 0
+
+    @classmethod
+    def reset(cls):
+        cls.outputs = OrderedDict()
+        cls.stage = 0
+        cls.layer = 0
+
+    @classmethod
+    def add(cls, name, value):
+        if cls.enable:
+            cls.outputs[f'{name}_{cls.stage}_{cls.layer}'] = value
 
 
 def _cfg(url='', **kwargs):
@@ -111,7 +130,7 @@ def window_reverse(windows, window_size: int, H: int, W: int):
     Returns:
         x: (B, H, W, C)
     """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    B = windows.shape[0] // (H * W // window_size // window_size)
     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
@@ -268,30 +287,37 @@ class SwinTransformerBlock(nn.Module):
         self.register_buffer("attn_mask", attn_mask)
 
     def forward(self, x):
+        DebugOutput.layer += 1
         H, W = self.input_resolution
-        B, L, C = x.shape
+        from torch.onnx.operators import shape_as_tensor
+        B, L, C = shape_as_tensor(x)
         assert L == H * W, "input feature has wrong size"
 
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
+        DebugOutput.add('norm', x)
 
         # cyclic shift
         if self.shift_size > 0:
             shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
+        DebugOutput.add('shift_fwd', shifted_x)
 
         # partition windows
         x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+        DebugOutput.add('x_windows', x_windows)
 
         # W-MSA/SW-MSA
         attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        DebugOutput.add('attn_windows', attn_windows)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+        DebugOutput.add('shifted_x', shifted_x)
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -299,10 +325,12 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
         x = x.view(B, H * W, C)
+        DebugOutput.add('shift_bwd', x)
 
         # FFN
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+        DebugOutput.add('res', x)
 
         return x
 
@@ -401,6 +429,8 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        DebugOutput.stage += 1
+        DebugOutput.layer = 0
         for blk in self.blocks:
             if not torch.jit.is_scripting() and self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
@@ -522,20 +552,34 @@ class SwinTransformer(nn.Module):
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
+        from collections import OrderedDict
         x = self.patch_embed(x)
         if self.absolute_pos_embed is not None:
             x = x + self.absolute_pos_embed
+        DebugOutput.add('embed', x)
         x = self.pos_drop(x)
+        DebugOutput.add('pos_drop', x)
         x = self.layers(x)
+        DebugOutput.add('layers', x)
         x = self.norm(x)  # B L C
+        DebugOutput.add('norm', x)
         x = self.avgpool(x.transpose(1, 2))  # B C 1
+        DebugOutput.add('avgpool', x)
         x = torch.flatten(x, 1)
         return x
 
     def forward(self, x):
+        DebugOutput.reset()
         x = self.forward_features(x)
         x = self.head(x)
-        return x
+        DebugOutput.add('probs', x)
+        if DebugOutput.enable:
+            if torch.onnx.is_in_onnx_export():
+                return tuple(DebugOutput.outputs.values())
+            else:
+                return DebugOutput.outputs
+        else:
+            return x
 
 
 def _create_swin_transformer(variant, pretrained=False, default_cfg=None, **kwargs):

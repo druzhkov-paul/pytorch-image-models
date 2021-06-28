@@ -1,5 +1,6 @@
 import argparse
 from functools import wraps
+from sys import maxsize
 
 import numpy as np
 import timm
@@ -12,8 +13,51 @@ from torch.onnx.symbolic_opset9 import _convolution
 try:
     import onnx
     import onnxruntime as rt
+    from onnxoptimizer import optimize
 except ImportError as e:
     raise ImportError(f'Please install onnx and onnxruntime first. {e}')
+
+
+@parse_args('v', 'is', 'is')
+def roll(g, self, shifts, dims):
+    assert len(shifts) == len(dims)
+
+    result = self
+    for i in range(len(shifts)):
+        shapes = []
+        shape = sym_help._slice_helper(g,
+                                       result,
+                                       axes=[dims[i]],
+                                       starts=[-shifts[i]],
+                                       ends=[maxsize])
+        shapes.append(shape)
+        shape = sym_help._slice_helper(g,
+                                       result,
+                                       axes=[dims[i]],
+                                       starts=[0],
+                                       ends=[-shifts[i]])
+        shapes.append(shape)
+        result = g.op("Concat", *shapes, axis_i=dims[i])
+
+    return result
+
+
+@parse_args('v', 'v', 'v', 'v', 'none')
+def addcmul_symbolic(g, self, tensor1, tensor2, value=1, out=None):
+    from torch.onnx.symbolic_opset9 import add, mul
+
+    if out is not None:
+        sym_help._unimplemented("addcmul", "Out parameter is not supported for addcmul")
+
+    x = mul(g, tensor1, tensor2)
+    value = sym_help._maybe_get_scalar(value)
+    if sym_help._scalar(value) != 1:
+        value = sym_help._if_scalar_type_as(g, value, x)
+        if not sym_help._is_value(value):
+            value = g.op(
+                "Constant", value_t=torch.tensor(value, dtype=torch.float32))
+        x = mul(g, x, value)
+    return add(g, self, x)
 
 
 @parse_args('v', 'v', 'v', 'is', 'is', 'is', 'is', 'i')
@@ -53,6 +97,9 @@ def parse_args():
         '--verify',
         action='store_true',
         help='verify the onnx model output against pytorch output')
+    parser.add_argument('--dyn-batch', action='store_true')
+    parser.add_argument('--dyn-res', action='store_true')
+    parser.add_argument('--clean', action='store_true')
     # parser.add_argument(
     #     '--shape',
     #     type=int,
@@ -70,12 +117,32 @@ def parse_args():
 #     return mean, std
 
 
+def optimize_onnx_graph(onnx_model_path):
+    onnx_model = onnx.load(onnx_model_path)
+
+    onnx_model = optimize(onnx_model, ['extract_constant_to_initializer',
+                                       'eliminate_unused_initializer'])
+
+    inputs = onnx_model.graph.input
+    name_to_input = {}
+    for input in inputs:
+        name_to_input[input.name] = input
+
+    for initializer in onnx_model.graph.initializer:
+        if initializer.name in name_to_input:
+            inputs.remove(name_to_input[initializer.name])
+
+    onnx.save(onnx_model, onnx_model_path)
+
+
 if __name__ == '__main__':
     args = parse_args()
 
     torch.onnx.symbolic_registry.register_op('conv_same_pad', conv_same_pad_symbolic, 'timm_custom', args.opset_version)
+    torch.onnx.symbolic_registry.register_op('roll', roll, '', args.opset_version)
+    torch.onnx.symbolic_registry.register_op('addcmul', addcmul_symbolic, '', args.opset_version)
 
-    model = timm.create_model(args.model_name, pretrained=True, exportable=True)
+    model = timm.create_model(args.model_name, pretrained=True, exportable=True, pretrained_strict=False)
     # model.load_state_dict(torch.load('model_best.pth.tar', map_location=device))
     model.eval()
     print(model.default_cfg)
@@ -83,6 +150,27 @@ if __name__ == '__main__':
     input_shape = (1, ) + model.default_cfg['input_size']
     print(input_shape)
     dummy_input = torch.randn(*input_shape)
+    # print('Run inference without tracing')
+    all_outputs = model(dummy_input)
+    print(f'Network has {len(all_outputs)} output(s)')
+
+    try:
+        output_names = list(all_outputs.keys())
+    except AttributeError:
+        if len(all_outputs) == 1:
+            output_names = ['probs']
+        else:
+            output_names = [f'out_{i}' for i, _ in enumerate(all_outputs)]
+
+    dynamic_axes = {}
+    if args.dyn_batch:
+        dynamic_axes.setdefault('image', {})[0] = "batch_size"
+        for k in output_names:
+            dynamic_axes.setdefault(k, {})[0] = "batch_size"
+    if args.dyn_res:
+        dynamic_axes.setdefault('image', {})[2] = "height"
+        dynamic_axes.setdefault('image', {})[3] = "width"
+    # print('Start export')
     torch.onnx.export(
         model,
         dummy_input,
@@ -92,13 +180,11 @@ if __name__ == '__main__':
         verbose=False,
         opset_version=args.opset_version,
         input_names=['image'],
-        output_names=['probs'],
-        strip_doc_string=False,
+        # output_names=['probs'],
+        output_names=output_names,
+        strip_doc_string=args.clean,
+        # operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
         operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
-        # dynamic_axes = {
-        #     "image": {
-        #         2: "height",
-        #         3: "width"
-        #     }
-        # }
+        dynamic_axes=dynamic_axes
     )
+    optimize_onnx_graph(args.output_file)

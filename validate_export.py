@@ -111,6 +111,8 @@ parser.add_argument('--real-labels', default='', type=str, metavar='FILENAME',
                     help='Real labels JSON file for imagenet evaluation')
 parser.add_argument('--valid-labels', default='', type=str, metavar='FILENAME',
                     help='Valid label indices txt file for validation of partial label space')
+parser.add_argument('--max-iter', default=None, type=int)
+parser.add_argument('--compare', action='store_true')
 
 
 def validate(args):
@@ -145,7 +147,8 @@ def validate(args):
         num_classes=args.num_classes,
         in_chans=3,
         global_pool=args.gp,
-        scriptable=args.torchscript)
+        scriptable=args.torchscript,
+        pretrained_strict=False)
 
     if args.num_classes is None:
         assert hasattr(pt_model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
@@ -232,12 +235,23 @@ def validate(args):
             # compute output
             with amp_autocast():
                 # print(input.shape)
+                ref_input = input
+                ref_target = target
                 input = input.cpu().numpy()
                 target = target.cpu()
                 output = onnx_model(input)
-                output = next(iter(output.values()))
+                if args.compare:
+                    ref_output = pt_model(ref_input)
+                    print('onnx keys', list(output.keys()))
+                    print('pt keys', list(ref_output.keys()))
+                    for k in ref_output.keys():
+                        if k in output:
+                            import numpy as np
+                            res = output[k]
+                            ref = ref_output[k].numpy()
+                            print(k, np.allclose(res, ref, rtol=0, atol=1e-4), np.max(np.abs(res - ref)))
+                output = output['probs']
                 output = torch.from_numpy(output)
-                # print(output)
 
             if valid_labels is not None:
                 output = output[:, valid_labels]
@@ -266,6 +280,9 @@ def validate(args):
                         batch_idx, len(loader), batch_time=batch_time,
                         rate_avg=input.shape[0] / batch_time.avg,
                         loss=losses, top1=top1, top5=top5))
+
+            if args.max_iter is not None and batch_idx == args.max_iter - 1:
+                break
 
     if real_labels is not None:
         # real labels mode replaces topk values at the end

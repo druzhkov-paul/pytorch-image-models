@@ -34,6 +34,9 @@ class PatchEmbed(nn.Module):
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x)
         if self.flatten:
-            x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+            # x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+            from torch.onnx.operators import shape_as_tensor
+            shape = shape_as_tensor(x)
+            x = x.reshape(shape[0], shape[1], -1).transpose(1, 2)
         x = self.norm(x)
         return x

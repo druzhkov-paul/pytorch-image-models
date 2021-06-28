@@ -273,7 +273,8 @@ class Attention(nn.Module):
         else:
             device_key = str(device)
             if device_key not in self.ab:
-                self.ab[device_key] = self.attention_biases[:, self.attention_bias_idxs]
+                # FIXME. Workaround for ONNX export.
+                self.ab[device_key] = self.attention_biases[:, self.attention_bias_idxs].detach()
             return self.ab[device_key]
 
     def forward(self, x):  # x (B,C,H,W)
@@ -367,7 +368,8 @@ class AttentionSubsample(nn.Module):
         else:
             device_key = str(device)
             if device_key not in self.ab:
-                self.ab[device_key] = self.attention_biases[:, self.attention_bias_idxs]
+                # FIXME. Workaround for ONNX export.
+                self.ab[device_key] = self.attention_biases[:, self.attention_bias_idxs].detach()
             return self.ab[device_key]
 
     def forward(self, x):
