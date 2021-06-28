@@ -22,7 +22,7 @@ from contextlib import suppress
 from timm.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
 from timm.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
 from timm.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_legacy
-from timm.utils.onnxruntime_backend import ModelONNXRuntime
+
 
 has_apex = False
 try:
@@ -51,8 +51,8 @@ parser.add_argument('--split', metavar='NAME', default='validation',
                     help='dataset split (default: validation)')
 parser.add_argument('--model', '-m', metavar='NAME', default='dpn92',
                     help='model architecture (default: dpn92)')
-parser.add_argument('--onnx', metavar='NAME', default='dpn92',
-                    help='model architecture (default: dpn92)')
+parser.add_argument('--onnx', metavar='PATH', default=None, help='path to ONNX file')
+parser.add_argument('--openvino', metavar='PATH', default=None, help='path to OpenVINO IR file')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 2)')
 parser.add_argument('-b', '--batch-size', default=1, type=int,
@@ -140,7 +140,13 @@ def validate(args):
         set_jit_legacy()
 
     # create model
-    onnx_model = ModelONNXRuntime(args.onnx)
+    if args.onnx:
+        from timm.utils.onnxruntime_backend import ModelONNXRuntime
+        model = ModelONNXRuntime(args.onnx)
+    elif args.openvino:
+        from timm.utils.openvino_backend import ModelOpenVINO
+        model = ModelOpenVINO(args.openvino)
+
     pt_model = create_model(
         args.model,
         pretrained=args.pretrained,
@@ -239,7 +245,7 @@ def validate(args):
                 ref_target = target
                 input = input.cpu().numpy()
                 target = target.cpu()
-                output = onnx_model(input)
+                output = model(input)
                 if args.compare:
                     ref_output = pt_model(ref_input)
                     print('onnx keys', list(output.keys()))
