@@ -19,6 +19,8 @@ import torch.nn.parallel
 from collections import OrderedDict
 from contextlib import suppress
 
+import numpy as np
+
 from timm.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
 from timm.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
 from timm.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_legacy
@@ -142,10 +144,10 @@ def validate(args):
     # create model
     if args.onnx:
         from timm.utils.onnxruntime_backend import ModelONNXRuntime
-        model = ModelONNXRuntime(args.onnx)
+        model_onnx = ModelONNXRuntime(args.onnx)
     elif args.openvino:
         from timm.utils.openvino_backend import ModelOpenVINO
-        model = ModelOpenVINO(args.openvino)
+        model_openvino = ModelOpenVINO(args.openvino)
 
     pt_model = create_model(
         args.model,
@@ -245,17 +247,24 @@ def validate(args):
                 ref_target = target
                 input = input.cpu().numpy()
                 target = target.cpu()
-                output = model(input)
+                output = model_onnx(input)
+                output_ov = model_openvino(input)
                 if args.compare:
-                    ref_output = pt_model(ref_input)
+                    # ref_output = pt_model(ref_input)
                     print('onnx keys', list(output.keys()))
-                    print('pt keys', list(ref_output.keys()))
-                    for k in ref_output.keys():
-                        if k in output:
-                            import numpy as np
-                            res = output[k]
-                            ref = ref_output[k].numpy()
-                            print(k, np.allclose(res, ref, rtol=0, atol=1e-4), np.max(np.abs(res - ref)))
+                    for k in output.keys():
+                        try:
+                            ov = output_ov[k]
+                        except:
+                            continue
+                        res = output[k]
+                        print(k, np.allclose(res, ov, rtol=0, atol=1e-4), np.max(np.abs(res - ov)))
+                    # print('pt keys', list(ref_output.keys()))
+                    # for k in ref_output.keys():
+                    #     if k in output:
+                    #         res = output[k]
+                    #         ref = ref_output[k].numpy()
+                    #         print(k, np.allclose(res, ref, rtol=0, atol=1e-4), np.max(np.abs(res - ref)))
                 output = output['probs']
                 output = torch.from_numpy(output)
 
