@@ -1,7 +1,7 @@
 import onnx
 import onnxruntime
 from onnx import helper, shape_inference
-from onnx.utils import polish_model
+# from onnx.utils import polish_model
 
 class ModelONNXRuntime:
 

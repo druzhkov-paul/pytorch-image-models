@@ -10,10 +10,10 @@ class XDict:
         self.d = d
         self.net = net
 
-    def __getitem__(self, name: str) -> Any:
+    def __getitem__(self, name: str):
         return self.net.get(self.d, name)
 
-    def __getattribute__(self, name: str) -> Any:
+    def __getattr__(self, name: str):
         return getattr(self.d, name)
 
 
